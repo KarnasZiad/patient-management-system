@@ -1,14 +1,15 @@
-### Creates a new patient entity
-POST http://lb-7e648e08.elb.localhost.localstack.cloud:4004/api/patients
+### Creates a new patient entity (random email so the request can be replayed)
+POST {{baseUrl}}/api/patients
 Content-Type: application/json
 Authorization: Bearer {{token}}
 
 {
   "name": "John Doe Kafka Test",
-  "email": "kafka_test11@example.com",
-  "address": "123 main street22",
+  "email": "kafka_test_{{$uuid}}@example.com",
+  "address": "123 main street",
   "dateOfBirth": "1995-09-09",
   "registeredDate": "2024-11-28"
 }
 
+> {% client.global.set("patientId", response.body.id) %}
 ###

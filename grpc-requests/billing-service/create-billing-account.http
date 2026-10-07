@@ -1,4 +1,4 @@
-GRPC localhost:9001/BillingService/CreateBillingAccount
+GRPC {{billingGrpc}}/BillingService/CreateBillingAccount
 
 {
   "patientId": "12333",

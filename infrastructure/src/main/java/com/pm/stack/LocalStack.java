@@ -27,6 +27,7 @@ import software.amazon.awscdk.services.ecs.FargateTaskDefinition;
 import software.amazon.awscdk.services.ecs.LogDriver;
 import software.amazon.awscdk.services.ecs.PortMapping;
 import software.amazon.awscdk.services.ecs.Protocol;
+import software.amazon.awscdk.services.ecs.Secret;
 import software.amazon.awscdk.services.ecs.patterns.ApplicationLoadBalancedFargateService;
 import software.amazon.awscdk.services.logs.LogGroup;
 import software.amazon.awscdk.services.logs.RetentionDays;
@@ -37,8 +38,24 @@ import software.amazon.awscdk.services.rds.DatabaseInstanceEngine;
 import software.amazon.awscdk.services.rds.PostgresEngineVersion;
 import software.amazon.awscdk.services.rds.PostgresInstanceEngineProps;
 import software.amazon.awscdk.services.route53.CfnHealthCheck;
+import software.amazon.awscdk.services.secretsmanager.ISecret;
+import software.amazon.awscdk.services.secretsmanager.SecretStringGenerator;
 
 public class LocalStack extends Stack {
+  private static final int AUTH_SERVICE_PORT = 4005;
+  private static final int PATIENT_SERVICE_PORT = 4000;
+  private static final int BILLING_SERVICE_PORT = 4001;
+  private static final int BILLING_SERVICE_GRPC_PORT = 9001;
+  private static final int ANALYTICS_SERVICE_PORT = 4002;
+  private static final int API_GATEWAY_PORT = 4004;
+
+  private static final String DB_USERNAME = "admin_user";
+  // LocalStack exposes the MSK brokers on these host ports
+  private static final String KAFKA_BOOTSTRAP_SERVERS =
+      "localhost.localstack.cloud:4510, localhost.localstack.cloud:4511, localhost.localstack.cloud:4512";
+  // On LocalStack, containers reach each other through the Docker host
+  private static final String SERVICE_HOST = "host.docker.internal";
+
   private final Vpc vpc;
   private final Cluster ecsCluster;
 
@@ -46,6 +63,19 @@ public class LocalStack extends Stack {
     super(scope, id, props);
 
     this.vpc = createVpc();
+
+    // Generated at deploy time and injected as an ECS secret: never in the code
+    // or in the task definition. Alphanumeric only => valid Base64 (64 chars = 48 bytes).
+    ISecret jwtSecret = software.amazon.awscdk.services.secretsmanager.Secret.Builder
+        .create(this, "JwtSecret")
+        .secretName("patient-management/jwt-secret")
+        .generateSecretString(SecretStringGenerator.builder()
+            .passwordLength(64)
+            .excludePunctuation(true)
+            .includeSpace(false)
+            .build())
+        .removalPolicy(RemovalPolicy.DESTROY)
+        .build();
 
     DatabaseInstance authServiceDb =
         createDatabase("AuthServiceDB", "auth-service-db");
@@ -66,9 +96,11 @@ public class LocalStack extends Stack {
     FargateService authService =
         createFargateService("AuthService",
             "auth-service",
-            List.of(4005),
+            List.of(AUTH_SERVICE_PORT),
             authServiceDb,
-            Map.of("JWT_SECRET", "Y2hhVEc3aHJnb0hYTzMyZ2ZqVkpiZ1RkZG93YWxrUkM="));
+            null,
+            Map.of("JWT_SECRET",
+                Secret.fromSecretsManager(jwtSecret)));
 
     authService.getNode().addDependency(authDbHealthCheck);
     authService.getNode().addDependency(authServiceDb);
@@ -76,14 +108,16 @@ public class LocalStack extends Stack {
     FargateService billingService =
         createFargateService("BillingService",
             "billing-service",
-            List.of(4001,9001),
+            List.of(BILLING_SERVICE_PORT, BILLING_SERVICE_GRPC_PORT),
+            null,
             null,
             null);
 
     FargateService analyticsService =
         createFargateService("AnalyticsService",
             "analytics-service",
-            List.of(4002),
+            List.of(ANALYTICS_SERVICE_PORT),
+            null,
             null,
             null);
 
@@ -91,12 +125,13 @@ public class LocalStack extends Stack {
 
     FargateService patientService = createFargateService("PatientService",
         "patient-service",
-        List.of(4000),
+        List.of(PATIENT_SERVICE_PORT),
         patientServiceDb,
         Map.of(
-            "BILLING_SERVICE_ADDRESS", "host.docker.internal",
-            "BILLING_SERVICE_GRPC_PORT", "9001"
-        ));
+            "BILLING_SERVICE_ADDRESS", SERVICE_HOST,
+            "BILLING_SERVICE_GRPC_PORT", String.valueOf(BILLING_SERVICE_GRPC_PORT)
+        ),
+        null);
     patientService.getNode().addDependency(patientServiceDb);
     patientService.getNode().addDependency(patientDbHealthCheck);
     patientService.getNode().addDependency(billingService);
@@ -123,7 +158,7 @@ public class LocalStack extends Stack {
         .vpc(vpc)
         .instanceType(InstanceType.of(InstanceClass.BURSTABLE2, InstanceSize.MICRO))
         .allocatedStorage(20)
-        .credentials(Credentials.fromGeneratedSecret("admin_user"))
+        .credentials(Credentials.fromGeneratedSecret(DB_USERNAME))
         .databaseName(dbName)
         .removalPolicy(RemovalPolicy.DESTROY)
         .build();
@@ -169,7 +204,8 @@ public class LocalStack extends Stack {
       String imageName,
       List<Integer> ports,
       DatabaseInstance db,
-      Map<String, String> additionalEnvVars) {
+      Map<String, String> additionalEnvVars,
+      Map<String, Secret> additionalSecrets) {
 
     FargateTaskDefinition taskDefinition =
         FargateTaskDefinition.Builder.create(this, id + "Task")
@@ -197,10 +233,16 @@ public class LocalStack extends Stack {
                 .build()));
 
     Map<String, String> envVars = new HashMap<>();
-    envVars.put("SPRING_KAFKA_BOOTSTRAP_SERVERS", "localhost.localstack.cloud:4510, localhost.localstack.cloud:4511, localhost.localstack.cloud:4512");
+    envVars.put("SPRING_KAFKA_BOOTSTRAP_SERVERS", KAFKA_BOOTSTRAP_SERVERS);
+
+    Map<String, Secret> secrets = new HashMap<>();
 
     if(additionalEnvVars != null){
       envVars.putAll(additionalEnvVars);
+    }
+
+    if(additionalSecrets != null){
+      secrets.putAll(additionalSecrets);
     }
 
     if(db != null){
@@ -209,15 +251,18 @@ public class LocalStack extends Stack {
           db.getDbInstanceEndpointPort(),
           imageName
       ));
-      envVars.put("SPRING_DATASOURCE_USERNAME", "admin_user");
-      envVars.put("SPRING_DATASOURCE_PASSWORD",
-          db.getSecret().secretValueFromJson("password").toString());
+      envVars.put("SPRING_DATASOURCE_USERNAME", DB_USERNAME);
+      // Injected by ECS from Secrets Manager: the password never appears in plain text
+      secrets.put("SPRING_DATASOURCE_PASSWORD",
+          Secret.fromSecretsManager(
+              db.getSecret(), "password"));
       envVars.put("SPRING_JPA_HIBERNATE_DDL_AUTO", "update");
       envVars.put("SPRING_SQL_INIT_MODE", "always");
       envVars.put("SPRING_DATASOURCE_HIKARI_INITIALIZATION_FAIL_TIMEOUT", "60000");
     }
 
     containerOptions.environment(envVars);
+    containerOptions.secrets(secrets);
     taskDefinition.addContainer(imageName + "Container", containerOptions.build());
 
     return FargateService.Builder.create(this, id)
@@ -239,10 +284,12 @@ public class LocalStack extends Stack {
         ContainerDefinitionOptions.builder()
             .image(ContainerImage.fromRegistry("api-gateway"))
             .environment(Map.of(
-                "SPRING_PROFILES_ACTIVE", "prod",
-                "AUTH_SERVICE_URL", "http://host.docker.internal:4005"
+                "AUTH_SERVICE_URL",
+                "http://%s:%d".formatted(SERVICE_HOST, AUTH_SERVICE_PORT),
+                "PATIENT_SERVICE_URL",
+                "http://%s:%d".formatted(SERVICE_HOST, PATIENT_SERVICE_PORT)
             ))
-            .portMappings(List.of(4004).stream()
+            .portMappings(List.of(API_GATEWAY_PORT).stream()
                 .map(port -> PortMapping.builder()
                     .containerPort(port)
                     .hostPort(port)
