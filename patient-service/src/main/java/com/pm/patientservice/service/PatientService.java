@@ -13,6 +13,7 @@ import java.time.LocalDate;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class PatientService {
@@ -35,20 +36,22 @@ public class PatientService {
     return patients.stream().map(PatientMapper::toDTO).toList();
   }
 
+  // Transactional: if the billing call fails, the patient insert is rolled back
+  @Transactional
   public PatientResponseDTO createPatient(PatientRequestDTO patientRequestDTO) {
     if (patientRepository.existsByEmail(patientRequestDTO.getEmail())) {
       throw new EmailAlreadyExistsException(
-          "A patient with this email " + "already exists"
+          "A patient with this email already exists: "
               + patientRequestDTO.getEmail());
     }
 
-    Patient newPatient = patientRepository.save(
+    Patient newPatient = patientRepository.saveAndFlush(
         PatientMapper.toModel(patientRequestDTO));
 
     billingServiceGrpcClient.createBillingAccount(newPatient.getId().toString(),
         newPatient.getName(), newPatient.getEmail());
 
-    kafkaProducer.sendEvent(newPatient);
+    kafkaProducer.sendEvent(newPatient, KafkaProducer.PATIENT_CREATED);
 
     return PatientMapper.toDTO(newPatient);
   }
@@ -62,7 +65,7 @@ public class PatientService {
     if (patientRepository.existsByEmailAndIdNot(patientRequestDTO.getEmail(),
         id)) {
       throw new EmailAlreadyExistsException(
-          "A patient with this email " + "already exists"
+          "A patient with this email already exists: "
               + patientRequestDTO.getEmail());
     }
 
@@ -76,6 +79,9 @@ public class PatientService {
   }
 
   public void deletePatient(UUID id) {
+    if (!patientRepository.existsById(id)) {
+      throw new PatientNotFoundException("Patient not found with ID: " + id);
+    }
     patientRepository.deleteById(id);
   }
 }

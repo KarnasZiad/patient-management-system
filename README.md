@@ -3,6 +3,21 @@
 Microservices architecture (API Gateway, Auth, Patient, Billing, Analytics) built with
 Spring Boot 3, gRPC, Kafka, PostgreSQL, Docker and AWS CDK / LocalStack.
 
+## Lancer en local (Docker Compose)
+
+```bash
+cp .env.example .env          # puis renseigner POSTGRES_PASSWORD et JWT_SECRET
+                              # (JWT_SECRET : openssl rand -base64 32)
+docker compose up --build -d  # PostgreSQL x2, Kafka, et les 5 services
+```
+
+- API Gateway : http://localhost:4004 (login : `testuser@test.com` / `password123`)
+- Tests d'intégration (stack démarrée) : `cd integration-tests && mvn test`
+- Logs d'un service : `docker compose logs -f patient-service`
+- Arrêt : `docker compose down` (ajouter `-v` pour effacer les bases)
+
+Plan d'amélioration : [docs/PLAN-AMELIORATIONS.md](docs/PLAN-AMELIORATIONS.md)
+
 
 # Patient Service
 

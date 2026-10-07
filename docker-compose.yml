@@ -1,0 +1,124 @@
+# Lance toute l'application en local : 2 bases PostgreSQL, Kafka et les 5 microservices.
+# Usage : cp .env.example .env   puis   docker compose up --build
+# Point d'entrée : http://localhost:4004 (API Gateway)
+
+services:
+
+  # ---------- Infrastructure ----------
+
+  auth-service-db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: db
+      POSTGRES_USER: ${POSTGRES_USER:-admin_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD manquant dans .env}
+    ports:
+      - "5001:5432"
+    volumes:
+      - auth-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  patient-service-db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: db
+      POSTGRES_USER: ${POSTGRES_USER:-admin_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD manquant dans .env}
+    ports:
+      - "5000:5432"
+    volumes:
+      - patient-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Kafka en mode KRaft (pas besoin de Zookeeper)
+  kafka:
+    image: apache/kafka:3.9.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      # kafka:9092 pour les conteneurs, localhost:9094 pour les outils lancés depuis ton PC
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    ports:
+      - "9094:9094"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  # ---------- Microservices ----------
+
+  auth-service:
+    build: ./auth-service
+    environment:
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET manquant dans .env}
+      SPRING_DATASOURCE_URL: jdbc:postgresql://auth-service-db:5432/db
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-admin_user}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      SPRING_JPA_HIBERNATE_DDL_AUTO: update
+      SPRING_SQL_INIT_MODE: always
+    depends_on:
+      auth-service-db:
+        condition: service_healthy
+
+  billing-service:
+    build: ./billing-service
+    ports:
+      - "9001:9001" # gRPC, pour tester avec grpc-requests/
+
+  patient-service:
+    build: ./patient-service
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://patient-service-db:5432/db
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-admin_user}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      SPRING_JPA_HIBERNATE_DDL_AUTO: update
+      SPRING_SQL_INIT_MODE: always
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      BILLING_SERVICE_ADDRESS: billing-service
+      BILLING_SERVICE_GRPC_PORT: 9001
+    depends_on:
+      patient-service-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      billing-service:
+        condition: service_started
+
+  analytics-service:
+    build: ./analytics-service
+    environment:
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  api-gateway:
+    build: ./api-gateway
+    environment:
+      AUTH_SERVICE_URL: http://auth-service:4005
+    ports:
+      - "4004:4004"
+    depends_on:
+      - auth-service
+      - patient-service
+
+volumes:
+  auth-db-data:
+  patient-db-data:

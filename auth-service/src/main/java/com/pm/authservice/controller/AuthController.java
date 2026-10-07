@@ -4,6 +4,7 @@ import com.pm.authservice.dto.LoginRequestDTO;
 import com.pm.authservice.dto.LoginResponseDTO;
 import com.pm.authservice.service.AuthService;
 import io.swagger.v3.oas.annotations.Operation;
+import jakarta.validation.Valid;
 import java.util.Optional;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -25,7 +26,7 @@ public class AuthController {
   @Operation(summary = "Generate token on user login")
   @PostMapping("/login")
   public ResponseEntity<LoginResponseDTO> login(
-      @RequestBody LoginRequestDTO loginRequestDTO) {
+      @Valid @RequestBody LoginRequestDTO loginRequestDTO) {
 
     Optional<String> tokenOptional = authService.authenticate(loginRequestDTO);
 
